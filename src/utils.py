@@ -32,11 +32,6 @@ def parse_args():
         help="Path to write the synthetic CSV. Defaults to %(default)s.",
     )
     parser.add_argument(
-        "--use-gpu",
-        action="store_true",
-        help="Train the GMM on a GPU using PyTorch.",
-    )
-    parser.add_argument(
         "--gpu-device",
         default="cuda",
         help="Torch device string to use when --use-gpu is set. Defaults to %(default)s.",

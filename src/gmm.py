@@ -1,13 +1,7 @@
 from pathlib import Path
 from utils import log_stage, parse_args
-
 import numpy as np
 import pandas as pd
-from gmm_cpu import (
-    fit_best_gmm_cpu,
-    invert_latent_samples,
-    prepare_boxcox_features_cpu,
-)
 
 from gmm_gpu import (
     fit_best_gmm_gpu_dp,
@@ -44,10 +38,7 @@ COUNT_LIKE_COLS = [
 BOOL_LIKE_COLS = ["encrypt_data"]
 
 # shrinking the range to only the cluster counts I "realistically" need
-# DEFAULT_COMPONENT_GRID = [32, 40, 48, 56, 64] 
-DEFAULT_COMPONENT_GRID = [56] 
-# DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
-DEFAULT_QUANTILE_LEVELS = np.array([0.0, 0.5, 0.9, 0.95, 0.99, 0.999, 0.9999, 0.99999], dtype=float)
+DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
 BOXCOX_SHIFT = 1.0
 DEFAULT_REG_COVAR = 5e-3
 DEFAULT_GPU_MAX_ITER = 400
@@ -66,40 +57,6 @@ def load_dataframe(csv_path: Path) -> pd.DataFrame:
     df_raw.to_parquet(cache_path)
     return df_raw
 
-def quantile_calibrate(source_values, target_values, quantile_levels=None):
-    """Post-inversion calibration"""
-    source = np.asarray(source_values, dtype=float)
-    target = np.asarray(target_values, dtype=float)
-    if source.size == 0:
-        return source
-    if quantile_levels is None:
-        quantile_levels = DEFAULT_QUANTILE_LEVELS
-    else:
-        quantile_levels = np.asarray(quantile_levels, dtype=float)
-    quantile_levels = np.unique(np.clip(quantile_levels, 0.0, 1.0))
-    quantile_levels.sort()
-    source_q = np.maximum.accumulate(np.quantile(source, quantile_levels))
-    target_q = np.maximum.accumulate(np.quantile(target, quantile_levels))
-    eps = 1e-6
-    for i in range(1, len(source_q)):
-        if source_q[i] <= source_q[i - 1]:
-            source_q[i] = source_q[i - 1] + eps
-        if target_q[i] <= target_q[i - 1]:
-            target_q[i] = target_q[i - 1] + eps
-    calibrated = np.interp(source, source_q, target_q, left=target_q[0], right=target_q[-1])
-    tail_ratio = (target_q[-1] + eps) / (source_q[-1] + eps)
-    higher_mask = source > source_q[-1]
-    if higher_mask.any():
-        calibrated[higher_mask] = target_q[-1] + (source[higher_mask] - source_q[-1]) * tail_ratio
-    lower_mask = source < source_q[0]
-    if lower_mask.any():
-        if len(source_q) > 1:
-            slope = (target_q[1] - target_q[0]) / max(source_q[1] - source_q[0], eps)
-        else:
-            slope = tail_ratio
-        calibrated[lower_mask] = target_q[0] + (source[lower_mask] - source_q[0]) * slope
-    return calibrated
-
 def apply_count_constraints(synthetic_features: pd.DataFrame):
     present_counts = [col for col in COUNT_LIKE_COLS if col in synthetic_features.columns]
     if present_counts:
@@ -110,7 +67,6 @@ def apply_count_constraints(synthetic_features: pd.DataFrame):
         dirs = synthetic_features["st_dirs"].astype(int)
         files = synthetic_features["st_files"].astype(int)
         synthetic_features["st_dirs"] = np.minimum(dirs, files).astype(int)
-
 
 def apply_constant_columns(synthetic_features: pd.DataFrame, constant_cols, constant_values):
     for col in constant_cols:
@@ -145,8 +101,6 @@ def generate_synthetic_dataset(
     data_path: Path,
     output_path: Path,
     component_grid=DEFAULT_COMPONENT_GRID,
-    # quantile_levels=DEFAULT_QUANTILE_LEVELS,
-    use_gpu: bool = False,
     gpu_kwargs: dict | None = None,
     gpu_max_cap: bool = False,
     seed: int = 42,
@@ -155,77 +109,56 @@ def generate_synthetic_dataset(
     df = load_dataframe(data_path)
     df = df[df['grp_delete'] != True]
     df = df[df['st_files'] != 0]
-    if use_gpu:
-        gpu_kwargs = gpu_kwargs or {}
-        gpu_device = gpu_kwargs.get("device", "cuda")
-        log_stage("Preparing Box-Cox features on GPU")
-        (
-            X_boxcox_gpu,
-            transformer_gpu,
-            constant_cols,
-            constant_values,
-            feature_names,
-        ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
-        log_stage("Training GMM on GPU")
-        gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
-        best_gmm, bic_df = fit_best_gmm_gpu_dp(
-            X_boxcox_gpu,
-            component_grid=component_grid,
-            **gpu_args,
-        )
-    else:
-        log_stage("Preparing Box-Cox features")
-        X_boxcox, transformer, constant_cols, constant_values = prepare_boxcox_features_cpu(df, FEATURE_COLS, BOXCOX_SHIFT)
-        feature_names = X_boxcox.columns
-        log_stage("Training GMM on CPU")
-        best_gmm, bic_df = fit_best_gmm_cpu(
-            X_boxcox,
-            component_grid=component_grid,
-            reg_covar=DEFAULT_REG_COVAR,
-            random_state=seed,
-        )
+    gpu_kwargs = gpu_kwargs or {}
+    gpu_device = gpu_kwargs.get("device", "cuda")
+    log_stage("Preparing Box-Cox features on GPU")
+    (
+        X_boxcox_gpu,
+        transformer_gpu,
+        constant_cols,
+        constant_values,
+        feature_names,
+    ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
+    log_stage("Training GMM on GPU")
+    gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
+    best_gmm, bic_df = fit_best_gmm_gpu_dp(
+        X_boxcox_gpu,
+        component_grid=component_grid,
+        **gpu_args,
+    )
+
     if not bic_df.empty:
         print("BIC scores:\n", bic_df)
     print("Selected components:", best_gmm.n_components)
-    if use_gpu:
-        if gpu_max_cap:
-            log_stage("Sampling from fitted GMM with max caps")
-            cap_values = df[feature_names].max()
-            for col in BOOL_LIKE_COLS:
-                if col in cap_values.index:
-                    cap_values[col] = np.inf
-            synthetic_features, labels = sample_with_max_cap(
-                best_gmm,
-                len(df),
-                feature_names,
-                cap_values,
-                BOXCOX_SHIFT,
-                transformer=transformer_gpu,
-                device=gpu_device,
-                seed=seed,
-            )
-            synthetic_features.index = df.index
-        else:
-            log_stage("Sampling from fitted GMM")
-            latent_samples, labels = best_gmm.sample(len(df), random_state=seed)
-            log_stage("Inverting Box-Cox transform")
-            synthetic_features = invert_latent_samples_gpu(
-                latent_samples,
-                transformer_gpu,
-                feature_names,
-                BOXCOX_SHIFT,
-                device=gpu_device,
-                index=df.index,
-            )
-    else: #CPU
+    if gpu_max_cap:
+        log_stage("Sampling from fitted GMM with max caps")
+        cap_values = df[feature_names].max()
+        for col in BOOL_LIKE_COLS:
+            if col in cap_values.index:
+                cap_values[col] = np.inf
+        synthetic_features, labels = sample_with_max_cap(
+            best_gmm,
+            len(df),
+            feature_names,
+            cap_values,
+            BOXCOX_SHIFT,
+            transformer=transformer_gpu,
+            device=gpu_device,
+            seed=seed,
+        )
+        synthetic_features.index = df.index
+    else:
         log_stage("Sampling from fitted GMM")
         latent_samples, labels = best_gmm.sample(len(df), random_state=seed)
         log_stage("Inverting Box-Cox transform")
-        synthetic_features = invert_latent_samples(latent_samples, transformer, feature_names, BOXCOX_SHIFT)
-
-    # log_stage("Calibrating feature quantiles")
-    # for col in FEATURE_COLS:
-    #     calibrate_feature_column(synthetic_features, df, col, quantile_levels)
+        synthetic_features = invert_latent_samples_gpu(
+            latent_samples,
+            transformer_gpu,
+            feature_names,
+            BOXCOX_SHIFT,
+            device=gpu_device,
+            index=df.index,
+        )
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
     log_stage("Restoring constant columns")
@@ -247,21 +180,19 @@ def main():
     data_path = Path(args.input)
     output_path = Path(args.output)
     gpu_kwargs = None
-    if args.use_gpu:
-        gpu_kwargs = {
-            "device": args.gpu_device,
-            "max_iter": DEFAULT_GPU_MAX_ITER,
-            "n_init": DEFAULT_GPU_N_INIT,
-            "tol": DEFAULT_GPU_TOL,
-            "batch_size": args.gpu_batch_size,
-            "reg_covar": DEFAULT_GPU_REG_COVAR,
-            "use_kmeans_init": DEFAULT_GPU_USE_KMEANS_INIT,
-            "kmeans_iters": DEFAULT_GPU_KMEANS_ITERS,
-        }
+    gpu_kwargs = {
+        "device": args.gpu_device,
+        "max_iter": DEFAULT_GPU_MAX_ITER,
+        "n_init": DEFAULT_GPU_N_INIT,
+        "tol": DEFAULT_GPU_TOL,
+        "batch_size": args.gpu_batch_size,
+        "reg_covar": DEFAULT_GPU_REG_COVAR,
+        "use_kmeans_init": DEFAULT_GPU_USE_KMEANS_INIT,
+        "kmeans_iters": DEFAULT_GPU_KMEANS_ITERS,
+    }
     generate_synthetic_dataset(
         data_path,
         output_path,
-        use_gpu=args.use_gpu,
         gpu_kwargs=gpu_kwargs,
         gpu_max_cap=args.gpu_max_cap,
         seed=args.seed,
