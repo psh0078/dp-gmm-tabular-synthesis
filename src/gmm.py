@@ -39,14 +39,14 @@ BOOL_LIKE_COLS = ["encrypt_data"]
 
 # shrinking the range to only the cluster counts I "realistically" need
 DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
+# DEFAULT_COMPONENT_GRID = [12] 
 BOXCOX_SHIFT = 1.0
+DEFAULT_MAX_ITER = 400
+DEFAULT_N_INIT = 4
+DEFAULT_TOL = 1e-3
 DEFAULT_REG_COVAR = 5e-3
-DEFAULT_GPU_MAX_ITER = 400
-DEFAULT_GPU_N_INIT = 4
-DEFAULT_GPU_TOL = 1e-3
-DEFAULT_GPU_REG_COVAR = 5e-3
-DEFAULT_GPU_KMEANS_ITERS = 10
-DEFAULT_GPU_USE_KMEANS_INIT = True
+DEFAULT_KMEANS_ITERS = 10
+DEFAULT_USE_KMEANS_INIT = True
 
 def load_dataframe(csv_path: Path) -> pd.DataFrame:
     cache_path = csv_path.with_suffix(".parquet")
@@ -127,8 +127,8 @@ def generate_synthetic_dataset(
         **gpu_args,
     )
 
-    if not bic_df.empty:
-        print("BIC scores:\n", bic_df)
+    # if not bic_df.empty:
+    #     print("BIC scores:\n", bic_df)
     print("Selected components:", best_gmm.n_components)
     if gpu_max_cap:
         log_stage("Sampling from fitted GMM with max caps")
@@ -182,19 +182,19 @@ def main():
     gpu_kwargs = None
     gpu_kwargs = {
         "device": args.gpu_device,
-        "max_iter": DEFAULT_GPU_MAX_ITER,
-        "n_init": DEFAULT_GPU_N_INIT,
-        "tol": DEFAULT_GPU_TOL,
-        "batch_size": args.gpu_batch_size,
-        "reg_covar": DEFAULT_GPU_REG_COVAR,
-        "use_kmeans_init": DEFAULT_GPU_USE_KMEANS_INIT,
-        "kmeans_iters": DEFAULT_GPU_KMEANS_ITERS,
+        "max_iter": DEFAULT_MAX_ITER,
+        "n_init": DEFAULT_N_INIT,
+        "tol": DEFAULT_TOL,
+        "batch_size": args.batch_size,
+        "reg_covar": DEFAULT_REG_COVAR,
+        "use_kmeans_init": DEFAULT_USE_KMEANS_INIT,
+        "kmeans_iters": DEFAULT_KMEANS_ITERS,
     }
     generate_synthetic_dataset(
         data_path,
         output_path,
         gpu_kwargs=gpu_kwargs,
-        gpu_max_cap=args.gpu_max_cap,
+        gpu_max_cap=args.max_cap,
         seed=args.seed,
     )
 

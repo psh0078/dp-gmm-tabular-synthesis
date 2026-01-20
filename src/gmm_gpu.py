@@ -504,6 +504,7 @@ def fit_best_gmm_gpu_dp(
         (weights, means, covariances), ll_value = run_em(k)
         num_params = k - 1 + k * n_features + k * n_features * (n_features + 1) / 2
         bic = -2 * ll_value + num_params * math.log(n_samples)
+        print(f"BIC scores: n_components: {k}, bic: {bic}\n")
         bic_records.append({"n_components": k, "bic": bic})
         if bic < best_bic:
             best_bic = bic

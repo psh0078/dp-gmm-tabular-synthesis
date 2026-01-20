@@ -1,9 +1,5 @@
-import json
-from pathlib import Path
 from typing import Iterable
 from argparse import ArgumentParser
-
-import pandas as pd
 
 try:
     from tqdm import tqdm
@@ -37,13 +33,13 @@ def parse_args():
         help="Torch device string to use when --use-gpu is set. Defaults to %(default)s.",
     )
     parser.add_argument(
-        "--gpu-batch-size",
+        "--batch-size",
         type=int,
         default=16384,
-        help="Batch size (in samples) for GPU EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
+        help="Batch size (in samples) for EM responsibilities. Use 0 to process the full dataset. Defaults to %(default)s.",
     )
     parser.add_argument(
-        "--gpu-max-cap",
+        "--max-cap",
         action="store_true",
         help="Apply max-capping during GPU sampling.",
     )
