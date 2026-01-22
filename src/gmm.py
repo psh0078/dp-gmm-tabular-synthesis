@@ -80,16 +80,35 @@ def apply_bool_constraints(synthetic_features: pd.DataFrame):
     clipped = synthetic_features[present].astype(float).clip(lower=0, upper=1)
     synthetic_features[present] = clipped.ge(0.5)
 
-def assemble_dataset(df: pd.DataFrame, synthetic_features: pd.DataFrame):
-    synthetic_dataset = df.copy()
-    for col in synthetic_features.columns:
-        if col in synthetic_dataset.columns:
-            col_min = df[col].min()
-            col_max = df[col].max()
-            synthetic_dataset[col] = synthetic_features[col].clip(lower=col_min, upper=col_max)
-    synthetic_dataset = synthetic_dataset[df.columns]
-    synthetic_dataset['sync'] = (synthetic_dataset['st_files_skipped'] > 0).astype(int)
-    return synthetic_dataset
+def build_dataset_metadata(df: pd.DataFrame, feature_names: list[str]) -> dict:
+    feature_mins = df[feature_names].min()
+    feature_maxs = df[feature_names].max()
+    cap_values = feature_maxs.copy()
+    for col in BOOL_LIKE_COLS:
+        if col in cap_values.index:
+            cap_values[col] = np.inf
+    return {
+        "row_count": len(df),
+        "feature_mins": feature_mins,
+        "feature_maxs": feature_maxs,
+        "cap_values": cap_values,
+        "column_order": list(df.columns),
+    }
+
+def assemble_dataset(synthetic_features: pd.DataFrame, dataset_info: dict):
+    feature_mins = dataset_info.get("feature_mins")
+    feature_maxs = dataset_info.get("feature_maxs")
+    column_order = dataset_info.get("column_order") or synthetic_features.columns.tolist()
+    synthetic_dataset = synthetic_features.copy()
+    if feature_mins is not None and feature_maxs is not None:
+        synthetic_dataset = synthetic_dataset.clip(lower=feature_mins, upper=feature_maxs)
+    if "st_files_skipped" in synthetic_dataset.columns:
+        synthetic_dataset["sync"] = (synthetic_dataset["st_files_skipped"] > 0).astype(int)
+    ordered_columns = [col for col in column_order if col in synthetic_dataset.columns]
+    for col in synthetic_dataset.columns:
+        if col not in ordered_columns:
+            ordered_columns.append(col)
+    return synthetic_dataset[ordered_columns]
 
 def save_gmm_artifacts(path: Path, artifacts: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -109,15 +128,13 @@ def generate_synthetic_dataset(
     seed: int = 42,
     artifact_path: Path | None = None,
 ):
-    log_stage(f"Loading data from {data_path}")
-    df = load_dataframe(data_path)
-    df = df[df['grp_delete'] != True]
-    df = df[df['st_files'] != 0]
     gpu_kwargs = gpu_kwargs or {}
     gpu_device = gpu_kwargs.get("device", "cuda")
     artifact_path_provided = artifact_path is not None
     if artifact_path is None:
         artifact_path = data_path.with_suffix(".gmm.pkl")
+    df = None
+    dataset_info = None
     if artifact_path.exists():
         log_stage(f"Loading fitted GMM artifacts from {artifact_path}")
         artifacts = load_gmm_artifacts(artifact_path)
@@ -128,10 +145,15 @@ def generate_synthetic_dataset(
         constant_cols = artifacts["constant_cols"]
         constant_values = artifacts["constant_values"]
         boxcox_shift = artifacts.get("boxcox_shift", BOXCOX_SHIFT)
+        dataset_info = artifacts.get("dataset_info")
         print("Loaded components:", best_gmm.n_components)
     elif artifact_path_provided:
         raise FileNotFoundError(f"GMM pickle not found: {artifact_path}")
     else:
+        log_stage(f"Loading data from {data_path}")
+        df = load_dataframe(data_path)
+        df = df[df['grp_delete'] != True]
+        df = df[df['st_files'] != 0]
         log_stage("Preparing Box-Cox features on GPU")
         (
             X_boxcox_gpu,
@@ -151,29 +173,42 @@ def generate_synthetic_dataset(
         # if not bic_df.empty:
         #     print("BIC scores:\n", bic_df)
         print("Selected components:", best_gmm.n_components)
-        # log_stage(f"Saving fitted GMM artifacts to {artifact_path}")
-        # save_gmm_artifacts(
-        #     artifact_path,
-        #     {
-        #         "gmm": best_gmm,
-        #         "bic_df": bic_df,
-        #         "transformer": transformer_gpu,
-        #         "feature_names": feature_names,
-        #         "constant_cols": constant_cols,
-        #         "constant_values": constant_values,
-        #         "boxcox_shift": BOXCOX_SHIFT,
-        #     },
-        # )
         boxcox_shift = BOXCOX_SHIFT
+        dataset_info = build_dataset_metadata(df, feature_names)
+        log_stage(f"Saving fitted GMM artifacts to {artifact_path}")
+        save_gmm_artifacts(
+            artifact_path,
+            {
+                "gmm": best_gmm,
+                "bic_df": bic_df,
+                "transformer": transformer_gpu,
+                "feature_names": feature_names,
+                "constant_cols": constant_cols,
+                "constant_values": constant_values,
+                "boxcox_shift": BOXCOX_SHIFT,
+                "dataset_info": dataset_info,
+            },
+        )
+    if dataset_info is None:
+        log_stage("Dataset metadata missing from artifacts; loading data to rebuild metadata")
+        if df is None:
+            df = load_dataframe(data_path)
+            df = df[df['grp_delete'] != True]
+            df = df[df['st_files'] != 0]
+        dataset_info = build_dataset_metadata(df, feature_names)
+
+    n_samples = dataset_info.get("row_count", len(df) if df is not None else None)
+    if n_samples is None:
+        raise ValueError("Unable to determine sample size from dataset metadata or input data.")
+    n_samples = int(n_samples)
     if gpu_max_cap:
         log_stage("Sampling from fitted GMM with max caps")
-        cap_values = df[feature_names].max()
-        for col in BOOL_LIKE_COLS:
-            if col in cap_values.index:
-                cap_values[col] = np.inf
+        cap_values = dataset_info.get("cap_values")
+        if cap_values is None:
+            raise ValueError("Cap values missing from dataset metadata; re-train and re-save the GMM artifacts.")
         synthetic_features, labels = sample_with_max_cap(
             best_gmm,
-            len(df),
+            n_samples,
             feature_names,
             cap_values,
             boxcox_shift,
@@ -181,10 +216,11 @@ def generate_synthetic_dataset(
             device=gpu_device,
             seed=seed,
         )
-        synthetic_features.index = df.index
+        if df is not None:
+            synthetic_features.index = df.index
     else:
         log_stage("Sampling from fitted GMM")
-        latent_samples, labels = best_gmm.sample(len(df), random_state=seed)
+        latent_samples, labels = best_gmm.sample(n_samples, random_state=seed)
         log_stage("Inverting Box-Cox transform")
         synthetic_features = invert_latent_samples_gpu(
             latent_samples,
@@ -192,7 +228,7 @@ def generate_synthetic_dataset(
             feature_names,
             boxcox_shift,
             device=gpu_device,
-            index=df.index,
+            index=df.index if df is not None else None,
         )
     log_stage("Applying count constraints")
     apply_count_constraints(synthetic_features)
@@ -203,7 +239,7 @@ def generate_synthetic_dataset(
 
     synthetic_features["cluster"] = labels
     log_stage("Assembling final dataset")
-    synthetic_dataset = assemble_dataset(df, synthetic_features)
+    synthetic_dataset = assemble_dataset(synthetic_features, dataset_info)
 
     log_stage(f"Writing synthetic data to {output_path}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
