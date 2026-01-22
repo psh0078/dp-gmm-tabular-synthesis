@@ -134,7 +134,7 @@ def generate_synthetic_dataset(
     gpu_device = gpu_kwargs.get("device", "cuda")
     artifact_path_provided = artifact_path is not None
     if artifact_path is None:
-        artifact_path = data_path.with_suffix(".gmm.pkl")
+        artifact_path = output_path.with_suffix(".gmm.pkl")
     df = None
     dataset_info = None
     if artifact_path.exists():
