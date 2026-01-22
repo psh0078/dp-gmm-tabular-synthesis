@@ -122,8 +122,8 @@ def load_gmm_artifacts(path: Path) -> dict:
         return pickle.load(handle)
 
 def generate_synthetic_dataset(
-    data_path: Path,
     output_path: Path,
+    data_path: Path | None = None,
     component_grid=DEFAULT_COMPONENT_GRID,
     gpu_kwargs: dict | None = None,
     gpu_max_cap: bool = False,
@@ -194,6 +194,8 @@ def generate_synthetic_dataset(
     if dataset_info is None:
         log_stage("Dataset metadata missing from artifacts; loading data to rebuild metadata")
         if df is None:
+            if data_path is None:
+                raise ValueError("Input data path required to rebuild metadata; provide --input.")
             df = load_dataframe(data_path)
             df = df[df['grp_delete'] != True]
             df = df[df['st_files'] != 0]
@@ -250,7 +252,9 @@ def generate_synthetic_dataset(
 
 def main():
     args = parse_args()
-    data_path = Path(args.input)
+    if args.input is None and args.gmm_pickle is None:
+        raise SystemExit("Provide an input CSV or an existing --gmm-pickle.")
+    data_path = Path(args.input) if args.input is not None else None
     output_path = Path(args.output)
     artifact_path = Path(args.gmm_pickle) if args.gmm_pickle else None
     gpu_kwargs = None
@@ -265,8 +269,8 @@ def main():
         "kmeans_iters": DEFAULT_KMEANS_ITERS,
     }
     generate_synthetic_dataset(
-        data_path,
         output_path,
+        data_path,
         gpu_kwargs=gpu_kwargs,
         gpu_max_cap=args.max_cap,
         seed=args.seed,
