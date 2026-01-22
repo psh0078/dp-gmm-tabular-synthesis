@@ -101,7 +101,9 @@ def assemble_dataset(synthetic_features: pd.DataFrame, dataset_info: dict):
     column_order = dataset_info.get("column_order") or synthetic_features.columns.tolist()
     synthetic_dataset = synthetic_features.copy()
     if feature_mins is not None and feature_maxs is not None:
-        synthetic_dataset = synthetic_dataset.clip(lower=feature_mins, upper=feature_maxs)
+        lower = feature_mins.reindex(synthetic_dataset.columns)
+        upper = feature_maxs.reindex(synthetic_dataset.columns)
+        synthetic_dataset = synthetic_dataset.clip(lower=lower, upper=upper, axis=1)
     if "st_files_skipped" in synthetic_dataset.columns:
         synthetic_dataset["sync"] = (synthetic_dataset["st_files_skipped"] > 0).astype(int)
     ordered_columns = [col for col in column_order if col in synthetic_dataset.columns]
