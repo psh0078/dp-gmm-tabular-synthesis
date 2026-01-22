@@ -19,13 +19,18 @@ def parse_args():
     parser.add_argument(
         "input",
         nargs="?",
-        default="../datasets/filtered.csv",
+        default="datasets/filtered.csv",
         help="Path to the CSV containing the real transfer records. Defaults to %(default)s.",
     )
     parser.add_argument(
         "--output",
-        default="../output/output.csv",
+        default="output/output.csv",
         help="Path to write the synthetic CSV. Defaults to %(default)s.",
+    )
+    parser.add_argument(
+        "--gmm-pickle",
+        default="./k56.gmm.pkl",
+        help="Path to a fitted GMM pickle to load. When provided, the file must exist.",
     )
     parser.add_argument(
         "--gpu-device",

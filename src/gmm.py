@@ -1,4 +1,5 @@
 from pathlib import Path
+import pickle
 from utils import log_stage, parse_args
 import numpy as np
 import pandas as pd
@@ -38,8 +39,8 @@ COUNT_LIKE_COLS = [
 BOOL_LIKE_COLS = ["encrypt_data"]
 
 # shrinking the range to only the cluster counts I "realistically" need
-DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
-# DEFAULT_COMPONENT_GRID = [12] 
+# DEFAULT_COMPONENT_GRID = [12, 18, 24, 30, 36] 
+DEFAULT_COMPONENT_GRID = [56] 
 BOXCOX_SHIFT = 1.0
 DEFAULT_MAX_ITER = 400
 DEFAULT_N_INIT = 4
@@ -90,12 +91,14 @@ def assemble_dataset(df: pd.DataFrame, synthetic_features: pd.DataFrame):
     synthetic_dataset['sync'] = (synthetic_dataset['st_files_skipped'] > 0).astype(int)
     return synthetic_dataset
 
-def calibrate_feature_column(synthetic_features: pd.DataFrame, df: pd.DataFrame, col: str, quantile_levels):
-    if col in synthetic_features.columns and col in df.columns:
-        target_values = df[col].astype(float).values
-        source_values = synthetic_features[col].astype(float).values
-        calibrated = quantile_calibrate(source_values, target_values, quantile_levels=quantile_levels)
-        synthetic_features[col] = np.clip(calibrated, 0, None)
+def save_gmm_artifacts(path: Path, artifacts: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as handle:
+        pickle.dump(artifacts, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+def load_gmm_artifacts(path: Path) -> dict:
+    with path.open("rb") as handle:
+        return pickle.load(handle)
 
 def generate_synthetic_dataset(
     data_path: Path,
@@ -104,6 +107,7 @@ def generate_synthetic_dataset(
     gpu_kwargs: dict | None = None,
     gpu_max_cap: bool = False,
     seed: int = 42,
+    artifact_path: Path | None = None,
 ):
     log_stage(f"Loading data from {data_path}")
     df = load_dataframe(data_path)
@@ -111,25 +115,56 @@ def generate_synthetic_dataset(
     df = df[df['st_files'] != 0]
     gpu_kwargs = gpu_kwargs or {}
     gpu_device = gpu_kwargs.get("device", "cuda")
-    log_stage("Preparing Box-Cox features on GPU")
-    (
-        X_boxcox_gpu,
-        transformer_gpu,
-        constant_cols,
-        constant_values,
-        feature_names,
-    ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
-    log_stage("Training GMM on GPU")
-    gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
-    best_gmm, bic_df = fit_best_gmm_gpu_dp(
-        X_boxcox_gpu,
-        component_grid=component_grid,
-        **gpu_args,
-    )
+    artifact_path_provided = artifact_path is not None
+    if artifact_path is None:
+        artifact_path = data_path.with_suffix(".gmm.pkl")
+    if artifact_path.exists():
+        log_stage(f"Loading fitted GMM artifacts from {artifact_path}")
+        artifacts = load_gmm_artifacts(artifact_path)
+        best_gmm = artifacts["gmm"]
+        bic_df = artifacts.get("bic_df")
+        transformer_gpu = artifacts["transformer"]
+        feature_names = artifacts["feature_names"]
+        constant_cols = artifacts["constant_cols"]
+        constant_values = artifacts["constant_values"]
+        boxcox_shift = artifacts.get("boxcox_shift", BOXCOX_SHIFT)
+        print("Loaded components:", best_gmm.n_components)
+    elif artifact_path_provided:
+        raise FileNotFoundError(f"GMM pickle not found: {artifact_path}")
+    else:
+        log_stage("Preparing Box-Cox features on GPU")
+        (
+            X_boxcox_gpu,
+            transformer_gpu,
+            constant_cols,
+            constant_values,
+            feature_names,
+        ) = prepare_boxcox_features_gpu(df, FEATURE_COLS, BOXCOX_SHIFT, device=gpu_device)
+        log_stage("Training GMM on GPU")
+        gpu_args = gpu_kwargs | {"dtype": transformer_gpu.dtype, "random_state": seed}
+        best_gmm, bic_df = fit_best_gmm_gpu_dp(
+            X_boxcox_gpu,
+            component_grid=component_grid,
+            **gpu_args,
+        )
 
-    # if not bic_df.empty:
-    #     print("BIC scores:\n", bic_df)
-    print("Selected components:", best_gmm.n_components)
+        # if not bic_df.empty:
+        #     print("BIC scores:\n", bic_df)
+        print("Selected components:", best_gmm.n_components)
+        # log_stage(f"Saving fitted GMM artifacts to {artifact_path}")
+        # save_gmm_artifacts(
+        #     artifact_path,
+        #     {
+        #         "gmm": best_gmm,
+        #         "bic_df": bic_df,
+        #         "transformer": transformer_gpu,
+        #         "feature_names": feature_names,
+        #         "constant_cols": constant_cols,
+        #         "constant_values": constant_values,
+        #         "boxcox_shift": BOXCOX_SHIFT,
+        #     },
+        # )
+        boxcox_shift = BOXCOX_SHIFT
     if gpu_max_cap:
         log_stage("Sampling from fitted GMM with max caps")
         cap_values = df[feature_names].max()
@@ -141,7 +176,7 @@ def generate_synthetic_dataset(
             len(df),
             feature_names,
             cap_values,
-            BOXCOX_SHIFT,
+            boxcox_shift,
             transformer=transformer_gpu,
             device=gpu_device,
             seed=seed,
@@ -155,7 +190,7 @@ def generate_synthetic_dataset(
             latent_samples,
             transformer_gpu,
             feature_names,
-            BOXCOX_SHIFT,
+            boxcox_shift,
             device=gpu_device,
             index=df.index,
         )
@@ -179,6 +214,7 @@ def main():
     args = parse_args()
     data_path = Path(args.input)
     output_path = Path(args.output)
+    artifact_path = Path(args.gmm_pickle) if args.gmm_pickle else None
     gpu_kwargs = None
     gpu_kwargs = {
         "device": args.gpu_device,
@@ -196,6 +232,7 @@ def main():
         gpu_kwargs=gpu_kwargs,
         gpu_max_cap=args.max_cap,
         seed=args.seed,
+        artifact_path=artifact_path,
     )
 
 if __name__ == "__main__":
